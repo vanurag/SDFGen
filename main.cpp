@@ -6,19 +6,16 @@
 #include "makelevelset3.h"
 #include "config.h"
 
-#ifdef HAVE_VTK
-  #include <vtkImageData.h>
-  #include <vtkFloatArray.h>
-  #include <vtkXMLImageDataWriter.h>
-  #include <vtkPointData.h>
-  #include <vtkSmartPointer.h>
-#endif
-
+#include "hdf5.h"
+#include "hdf5_hl.h"
+#include "H5Cpp.h"
 
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <limits>
+
+using namespace H5;
 
 int main(int argc, char* argv[]) {
   
@@ -125,54 +122,78 @@ int main(int argc, char* argv[]) {
 
   std::string outname;
 
-  #ifdef HAVE_VTK
-    // If compiled with VTK, we can directly output a volumetric image format instead
-    //Very hackily strip off file suffix.
-    outname = filename.substr(0, filename.size()-4) + std::string(".vti");
-    std::cout << "Writing results to: " << outname << "\n";
-    vtkSmartPointer<vtkImageData> output_volume = vtkSmartPointer<vtkImageData>::New();
+  // store to HDF file format.
+  //Very hackily strip off file suffix.
+  outname = filename.substr(0, filename.size()-4) + std::string(".h5");
+  std::cout << "Writing results to: " << outname << "\n";
 
-    output_volume->SetDimensions(phi_grid.ni ,phi_grid.nj ,phi_grid.nk);
-    output_volume->SetOrigin( phi_grid.ni*dx/2, phi_grid.nj*dx/2,phi_grid.nk*dx/2);
-    output_volume->SetSpacing(dx,dx,dx);
+  // Create a new file using the default property lists.
+  H5File file(std::string(outname), H5F_ACC_TRUNC);
 
-    vtkSmartPointer<vtkFloatArray> distance = vtkSmartPointer<vtkFloatArray>::New();
-    
-    distance->SetNumberOfTuples(phi_grid.a.size());
-    
-    output_volume->GetPointData()->AddArray(distance);
-    distance->SetName("Distance");
+  /* create a double type dataset named "data" */
+  int RANK = 2;
+  hsize_t     dims[RANK]={1,4};
+  hsize_t     max_dims[RANK]={H5S_UNLIMITED,4};
+  hsize_t     chunk_dims[RANK]={1,4};
+  DataSpace *dataspace = new DataSpace(RANK, dims, max_dims);
+  // Modify dataset creation property to enable chunking
+  DSetCreatPropList prop;
+  prop.setChunk(RANK, chunk_dims);
+  DataSet *dataset = new DataSet(file.createDataSet("data", PredType::IEEE_F64LE, *dataspace, prop));
+  // Dataset Extention details
+  hsize_t offset[RANK];
+  hsize_t dimsext[RANK]={1,4}; // extend dimensions
+  double dataext[1][4];
 
-    for(unsigned int i = 0; i < phi_grid.a.size(); ++i) {
-      distance->SetValue(i, phi_grid.a[i]);
+  std::cout << "no of sdf entries being written: " << phi_grid.a.size() << std::endl;
+  for(unsigned int v = 0; v < phi_grid.a.size(); ++v) {
+//    std::cout << "entry: " << v << std::endl;
+
+//    std::cout << "v0" << std::endl;
+    // Extend dataset for new block
+    if (v > 0) {
+      hsize_t newsize[RANK]={v+1,4};
+      dataset->extend(newsize);
     }
 
-    vtkSmartPointer<vtkXMLImageDataWriter> writer =
-    vtkSmartPointer<vtkXMLImageDataWriter>::New();
-    writer->SetFileName(outname.c_str());
+    // Fill dataset
+    // SDF, global pos. in voxel units (i,j,k)
+    // v = k*ni*nj + j*ni + i;
+    // k = floor(v/(ni*nj))
+    // j = floor((v-k*ni*nj)/ni)
+    // i = v - k*ni*nj - j*ni
+//    std::cout << "v1" << std::endl;
+    dataext[0][0] =  (double)(phi_grid.a[v]);
+    dataext[0][3] =  (double)(std::floor(v/(phi_grid.ni*phi_grid.nj)));  // k
+    dataext[0][2] =  (double)(std::floor((v - dataext[0][3]*phi_grid.ni*phi_grid.nj)/phi_grid.ni)); // j
+    dataext[0][1] =  (double)(v - dataext[0][3]*phi_grid.ni*phi_grid.nj - dataext[0][2]*phi_grid.ni); // i
 
-    #if VTK_MAJOR_VERSION <= 5
-      writer->SetInput(output_volume);
-    #else
-      writer->SetInputData(output_volume);
-    #endif
-    writer->Write();
+    // Write data to dataset
+    // Select a hyperslab in extended portion of the dataset.
+//    std::cout << "v2" << std::endl;
+    DataSpace *filespace = new DataSpace(dataset->getSpace());
+    offset[0] = v;
+    offset[1] = 0;
+    filespace->selectHyperslab(H5S_SELECT_SET, dimsext, offset);
 
-  #else
-    // if VTK support is missing, default back to the original ascii file-dump.
-    //Very hackily strip off file suffix.
-    outname = filename.substr(0, filename.size()-4) + std::string(".sdf");
-    std::cout << "Writing results to: " << outname << "\n";
-    
-    std::ofstream outfile( outname.c_str());
-    outfile << phi_grid.ni << " " << phi_grid.nj << " " << phi_grid.nk << std::endl;
-    outfile << min_box[0] << " " << min_box[1] << " " << min_box[2] << std::endl;
-    outfile << dx << std::endl;
-    for(unsigned int i = 0; i < phi_grid.a.size(); ++i) {
-      outfile << phi_grid.a[i] << std::endl;
-    }
-    outfile.close();
-  #endif
+    // Define memory space.
+//    std::cout << "v3" << std::endl;
+    DataSpace *memspace = new DataSpace(RANK, dimsext, NULL);
+
+    // Write data to the extended portion of the dataset.
+//    std::cout << "v4" << std::endl;
+    dataset->write(dataext, PredType::IEEE_F64LE, *memspace, *filespace);
+
+//    std::cout << "v5" << std::endl;
+    delete filespace;
+    delete memspace;
+  }
+  // Close all objects and file.
+  prop.close();
+  delete dataspace;
+  delete dataset;
+  file.close();
+
 
   std::cout << "Processing complete.\n";
 

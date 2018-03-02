@@ -19,11 +19,9 @@ set(CMAKE_CXX_FLAGS "-O3")
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native")
 
-#checks if VTK is available
-find_package(VTK QUIET)
-if(VTK_FOUND)
-	set(HAVE_VTK 1)
-endif()
+find_package (HDF5 EXACT 1.8.20 REQUIRED)
+INCLUDE_DIRECTORIES (${HDF5_INCLUDE_DIR})
+set(hdf5_libs hdf5 hdf5_cpp)
 
 #Generates config.h replacing expressions in config.h.in with actual values
 configure_file(
@@ -33,7 +31,4 @@ configure_file(
 
 add_executable(${PROJECT_NAME} main.cpp  makelevelset3.cpp)
 
-if(VTK_FOUND)
-	include_directories(${VTK_INCLUDE_DIRS})
-	target_link_libraries(${PROJECT_NAME} ${VTK_LIBRARIES})
-endif()
+target_link_libraries(${PROJECT_NAME} ${hdf5_libs})
