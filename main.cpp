@@ -131,10 +131,11 @@ int main(int argc, char* argv[]) {
   H5File file(std::string(outname), H5F_ACC_TRUNC);
 
   /* create a double type dataset named "data" */
-  int RANK = 2;
-  hsize_t     dims[RANK]={1,4};
-  hsize_t     max_dims[RANK]={H5S_UNLIMITED,4};
-  hsize_t     chunk_dims[RANK]={1,4};
+  int RANK = 5;
+  int chunk_size = 8; // sdf will be stored in chunk_size x chunk_size x chunk_size sized chunks
+  hsize_t     dims[RANK]={1,4,chunk_size,chunk_size,chunk_size};
+  hsize_t     max_dims[RANK]={H5S_UNLIMITED,4,chunk_size,chunk_size,chunk_size};
+  hsize_t     chunk_dims[RANK]={1,4,chunk_size,chunk_size,chunk_size};
   DataSpace *dataspace = new DataSpace(RANK, dims, max_dims);
   // Modify dataset creation property to enable chunking
   DSetCreatPropList prop;
@@ -142,58 +143,66 @@ int main(int argc, char* argv[]) {
   DataSet *dataset = new DataSet(file.createDataSet("data", PredType::IEEE_F64LE, *dataspace, prop));
   // Dataset Extention details
   hsize_t offset[RANK];
-  hsize_t dimsext[RANK]={1,4}; // extend dimensions
-  double dataext[1][4];
+  hsize_t dimsext[RANK]={1,4,chunk_size,chunk_size,chunk_size}; // extend dimensions
+  double dataext[1][4][chunk_size][chunk_size][chunk_size];
 
   std::cout << "no of sdf entries being written: " << phi_grid.a.size() << std::endl;
-  for(unsigned int v = 0; v < phi_grid.a.size(); ++v) {
-//    std::cout << "entry: " << v << std::endl;
+  std::cout << "voxel grid size: " << phi_grid.ni << " x " << phi_grid.nj << " x " << phi_grid.nk << std::endl;
+  std::cout << "chunk grid size: " << phi_grid.ni/chunk_size << " x " << phi_grid.nj/chunk_size << " x " << phi_grid.nk/chunk_size << std::endl;
+  int chunk_id = 0;
+  for (int k = 0; k < phi_grid.nk/chunk_size; ++k) {
+    for (int j = 0; j < phi_grid.nj/chunk_size; ++j) {
+      for (int i = 0; i < phi_grid.ni/chunk_size; ++i) {
+        // Extend dataset for new block
+        if (chunk_id > 0) {
+          hsize_t newsize[RANK]={chunk_id+1,4,chunk_size,chunk_size,chunk_size};
+          dataset->extend(newsize);
+        }
 
-//    std::cout << "v0" << std::endl;
-    // Extend dataset for new block
-    if (v > 0) {
-      hsize_t newsize[RANK]={v+1,4};
-      dataset->extend(newsize);
+        // fill up chunk
+        bool has_surface = false; // flag to indicate if atleast one surface voxel is present in the chunk
+        for (int ck = 0; ck < chunk_size; ++ck) for (int cj = 0; cj < chunk_size; ++cj) for (int ci = 0; ci < chunk_size; ++ci) {
+          // Fill dataset
+          // SDF, global pos. in voxel units (i,j,k)
+          dataext[0][0][ck][cj][ci] =  (double)(phi_grid(i*chunk_size+ci, j*chunk_size+cj, k*chunk_size+ck));
+          dataext[0][1][ck][cj][ci] =  (double)(i*chunk_size+ci);  // i
+          dataext[0][2][ck][cj][ci] =  (double)(j*chunk_size+cj);  // j
+          dataext[0][3][ck][cj][ci] =  (double)(k*chunk_size+ck);  // k
+
+          if (abs(phi_grid(i*chunk_size+ci, j*chunk_size+cj, k*chunk_size+ck)) < dx) has_surface = true;
+        }
+        if (!has_surface) continue;
+
+        // Write data to dataset
+        // Select a hyperslab in extended portion of the dataset.
+        DataSpace *filespace = new DataSpace(dataset->getSpace());
+        offset[0] = chunk_id;
+        offset[1] = 0;
+        offset[2] = 0;
+        offset[3] = 0;
+        offset[4] = 0;
+        filespace->selectHyperslab(H5S_SELECT_SET, dimsext, offset);
+
+        // Define memory space.
+        DataSpace *memspace = new DataSpace(RANK, dimsext, NULL);
+
+        // Write data to the extended portion of the dataset.
+        dataset->write(dataext, PredType::IEEE_F64LE, *memspace, *filespace);
+
+        delete filespace;
+        delete memspace;
+
+        chunk_id += 1;
+      }
     }
-
-    // Fill dataset
-    // SDF, global pos. in voxel units (i,j,k)
-    // v = k*ni*nj + j*ni + i;
-    // k = floor(v/(ni*nj))
-    // j = floor((v-k*ni*nj)/ni)
-    // i = v - k*ni*nj - j*ni
-//    std::cout << "v1" << std::endl;
-    dataext[0][0] =  (double)(phi_grid.a[v]);
-    dataext[0][3] =  (double)(std::floor(v/(phi_grid.ni*phi_grid.nj)));  // k
-    dataext[0][2] =  (double)(std::floor((v - dataext[0][3]*phi_grid.ni*phi_grid.nj)/phi_grid.ni)); // j
-    dataext[0][1] =  (double)(v - dataext[0][3]*phi_grid.ni*phi_grid.nj - dataext[0][2]*phi_grid.ni); // i
-
-    // Write data to dataset
-    // Select a hyperslab in extended portion of the dataset.
-//    std::cout << "v2" << std::endl;
-    DataSpace *filespace = new DataSpace(dataset->getSpace());
-    offset[0] = v;
-    offset[1] = 0;
-    filespace->selectHyperslab(H5S_SELECT_SET, dimsext, offset);
-
-    // Define memory space.
-//    std::cout << "v3" << std::endl;
-    DataSpace *memspace = new DataSpace(RANK, dimsext, NULL);
-
-    // Write data to the extended portion of the dataset.
-//    std::cout << "v4" << std::endl;
-    dataset->write(dataext, PredType::IEEE_F64LE, *memspace, *filespace);
-
-//    std::cout << "v5" << std::endl;
-    delete filespace;
-    delete memspace;
   }
+
   // Close all objects and file.
   prop.close();
   delete dataspace;
   delete dataset;
   file.close();
-
+  std::cout << "In total " << chunk_id << " voxel chunks of size " << chunk_size << " saved to " << outname << std::endl;
 
   std::cout << "Processing complete.\n";
 
